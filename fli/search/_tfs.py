@@ -257,6 +257,35 @@ def unsupported_filters(filters: Any) -> list[str]:
     return named
 
 
+def has_client_side_filters(filters: Any) -> bool:
+    """Whether any filter :func:`apply_client_side_filters` applies is set.
+
+    Prices that never pass through that function — the nearby-dates grid
+    (:func:`fli.search._decoders.parse_date_grid`) — are only trustworthy
+    when this is ``False``: the grid's cheapest fare may be on an airline,
+    time or duration the caller excluded.
+    """
+    if getattr(filters, "airlines", None) or getattr(filters, "airlines_exclude", None):
+        return True
+    if getattr(filters, "max_duration", None) is not None:
+        return True
+    if getattr(getattr(filters, "price_limit", None), "max_price", None) is not None:
+        return True
+    for segment in getattr(filters, "flight_segments", None) or []:
+        window = getattr(segment, "time_restrictions", None)
+        if window is not None and any(
+            getattr(window, bound, None) is not None
+            for bound in (
+                "earliest_departure",
+                "latest_departure",
+                "earliest_arrival",
+                "latest_arrival",
+            )
+        ):
+            return True
+    return False
+
+
 def apply_client_side_filters(flights: list[Any], filters: Any) -> list[Any]:
     """Apply the filters ``tfs`` has no field for, to already-decoded rows.
 

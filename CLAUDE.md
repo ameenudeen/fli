@@ -229,6 +229,18 @@ Search for flights on a specific date.
 - `children` / `infants_in_seat` / `infants_on_lap` - Passenger mix additions;
   see "Note on passenger limits" below
 
+**Children and infants:** when Google inlines no rows for the party
+(`SearchFlights.sparse_passenger_mix`), the tool re-runs the search with every
+traveler priced as an adult and returns those flights with
+`prices_are_upper_bounds: true`, `price_basis: "all_travelers_as_adults"` and a
+`note`. A child or infant fare does not exceed an adult fare, so each price is
+an upper bound. Each flight's `booking_url` still encodes the real party. When
+the page carries Google's nearby-dates grid (`payload[6]`, decoded by
+`parse_date_grid`), the response also lists `nearby_dates`. Those are real
+full-party prices, but only for date pairs Google already has cached, which in
+practice are the same pairs that return rows. That is why the date sweep does
+not use the grid: tried 2026-10, it priced zero extra dates.
+
 **Response:** Each flight in `flights[]` carries its own `booking_url` — a
 `tfs` protobuf deep link that opens the specific itinerary's booking page
 (vendor fares + "Continue" CTA) on Google Flights. The token is deterministic
@@ -253,6 +265,13 @@ Find cheapest travel dates within a range.
 - `currency`, `language`, `country` - Same locale knobs as `search_flights`
 - `sort_by_price` - Boolean to sort by price
 - `passengers`, `children`, `infants_in_seat`, `infants_on_lap` - Same as `search_flights`
+- `price_children_as_adults` - Price every traveler as an adult. Without it, a
+  party with children or infants sees only the airlines Google prices for them
+  (measured 2026-10, SIN→JED 2 adults + child + lap infant, 8 nights: 7 dates,
+  all Scoot, from S$3,026; with it, 45 dates, from S$2,462 on Oman Air). The
+  response then carries `prices_are_upper_bounds: true` and
+  `price_basis: "all_travelers_as_adults"`. Without it, a family search
+  carries a `note` saying cheaper airlines may be missing.
 
 **Response:** Each date result carries a `booking_url` deep-linking to Google
 Flights for that specific date (and return date for round trips).

@@ -172,6 +172,7 @@ Find the cheapest travel dates between two airports within a date range.
 | `language` | string | No | null | BCP-47 language code (`hl=`) |
 | `country` | string | No | null | ISO 3166-1 alpha-2 country (`gl=`) |
 | `sort_by_price` | bool | No | false | Sort results by price (lowest first) |
+| `price_children_as_adults` | bool | No | false | Price every traveler as an adult. A search with children or infants sees only the airlines Google prices for them; this compares every airline. Results carry `prices_are_upper_bounds: true`. |
 | `passengers` | int | No | 1 | Number of adult passengers |
 | `children` | int | No | 0 | Number of children (ages 2-11) |
 | `infants_in_seat` | int | No | 0 | Number of infants (under 2) occupying their own seat |

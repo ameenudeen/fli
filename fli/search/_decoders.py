@@ -13,8 +13,8 @@ booking-option row).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Any, NamedTuple
 
 from fli.core import extract_currency_from_price_token
 from fli.models import (
@@ -370,7 +370,16 @@ def _parse_price_info(row: list) -> tuple[float | None, str | None]:
     price_block = _get_price_block(row)
     if price_block is None:
         raise ValueError("price block missing — skip row")
+    return _parse_price_block(price_block)
 
+
+def _parse_price_block(price_block: list) -> tuple[float | None, str | None]:
+    """Decode a ``[[None, price], currency_token]`` block into ``(price, currency)``.
+
+    Shared by flight rows (``row[1]``) and date-grid entries (``entry[2]``),
+    which use the same encoding. Raises ``ValueError`` on a malformed block;
+    see :func:`_parse_price_info`.
+    """
     try:
         head = price_block[0]
         if not isinstance(head, list):
@@ -485,6 +494,59 @@ def _parse_airport(code: str) -> Airport:
 # ---------------------------------------------------------------------------
 # Booking option decoding
 # ---------------------------------------------------------------------------
+
+
+class GridPrice(NamedTuple):
+    """One cell of the nearby-dates price grid a search page carries.
+
+    ``price`` is the cheapest fare Google knows for the whole party on that
+    date pair, priced with the request's own passengers, cabin and stops.
+    ``inbound`` is ``None`` for one-way searches.
+    """
+
+    outbound: date
+    inbound: date | None
+    price: float
+    currency: str | None
+
+
+def parse_date_grid(payload: Any) -> list[GridPrice]:
+    """Decode the nearby-dates price grid at ``payload[6][0][4][0]``.
+
+    Google fills this grid when it inlines no flight rows for the requested
+    dates — routinely for a party with children or infants, whose rows it
+    prices client-side (see ``SPARSE_PASSENGER_MIX_WARNING``). Each cell is
+    ``[outbound, inbound|None, [[None, price], currency_token], ...]``, and its
+    price is for the full party: where a date pair also has rows, the two
+    agree (measured 2026-10, SIN→JED, 2 adults + child + lap infant, four
+    pairs, all identical).
+
+    The grid knows nothing about the filters fli applies after fetching
+    (airlines, price cap, duration, time windows), so callers must not use it
+    when any of those are set — see
+    :func:`fli.search._tfs.has_client_side_filters`.
+
+    Total by construction: any absent or malformed part yields fewer (or no)
+    cells, never an exception, because it is read from untrusted wire data on
+    an already-empty search.
+    """
+    cells = safe_get(safe_get(safe_get(safe_get(payload, 6), 0), 4), 0)
+    if not isinstance(cells, list):
+        return []
+    out: list[GridPrice] = []
+    for cell in cells:
+        if not isinstance(cell, list) or len(cell) < 3 or not isinstance(cell[2], list):
+            continue
+        try:
+            outbound = date.fromisoformat(cell[0])
+            inbound = date.fromisoformat(cell[1]) if cell[1] is not None else None
+            price, currency = _parse_price_block(cell[2])
+        except (TypeError, ValueError):
+            continue
+        if price is None or price <= 0:
+            continue
+        out.append(GridPrice(outbound, inbound, price, currency))
+    return out
 
 
 def parse_booking_chunk(chunk: Any) -> list[BookingOption]:

@@ -26,14 +26,17 @@ from fli.models import (
 from fli.models.google_flights.base import SortBy, TripType
 from fli.search._concurrency import parallel_map
 from fli.search._decoders import (
+    GridPrice,
     _try_parse_booking_row,  # noqa: F401 — back-compat re-export for tests
     parse_booking_chunk,
+    parse_date_grid,
     parse_flight_row,
 )
 from fli.search._tfs import (
     apply_client_side_filters,
     build_tfs,
     fetch_payload,
+    has_client_side_filters,
     page_url,
     unsupported_filters,
 )
@@ -182,6 +185,9 @@ class SearchFlights:
         # Set at the start of every search() call — see the
         # sparse_passenger_mix property.
         self._sparse_passenger_mix: bool = False
+        # Set at the start of every search() call — see the
+        # nearby_date_prices property.
+        self._nearby_date_prices: list[GridPrice] = []
 
     @property
     def sparse_passenger_mix(self) -> bool:
@@ -208,6 +214,23 @@ class SearchFlights:
         themselves.
         """
         return self._sparse_passenger_mix
+
+    @property
+    def nearby_date_prices(self) -> list[GridPrice]:
+        """Full-party prices for nearby dates when the last search() inlined no rows.
+
+        When Google inlines no flight rows for the requested dates — routinely
+        for a party with children or infants — the page still carries a grid
+        of prices for nearby date pairs, priced for the same passengers, cabin
+        and stops (see :func:`fli.search._decoders.parse_date_grid`). This is
+        that grid, cheapest first, from the top-level fetch of the most recent
+        :meth:`search` call. Empty when that fetch had rows, when the page
+        carried no grid, or when a client-side filter (airlines, price cap,
+        duration, time window) is set — the grid cannot honour those.
+
+        Same concurrency caveat as :attr:`sparse_passenger_mix`.
+        """
+        return self._nearby_date_prices
 
     # ------------------------------------------------------------------
     # Public search API
@@ -255,6 +278,7 @@ class SearchFlights:
         # Reset before any code below can raise, so a search that raises
         # never leaves a stale True from an earlier call on this instance.
         self._sparse_passenger_mix = False
+        self._nearby_date_prices = []
 
         if not isinstance(top_n, int) or isinstance(top_n, bool) or not 1 <= top_n <= 10:
             raise ValueError(
@@ -395,6 +419,9 @@ class SearchFlights:
                 f"Parsed 0/{len(flights_raw)} flight rows — "
                 f"Google response shape may have changed (sample reasons: {sample})"
             )
+
+        if capture_session and not flights_raw and not has_client_side_filters(filters):
+            self._nearby_date_prices = sorted(parse_date_grid(inner), key=lambda cell: cell.price)
 
         if tracker is not None:
             tracker.record(len(flights))

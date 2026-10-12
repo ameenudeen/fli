@@ -203,6 +203,15 @@ What that means in practice:
   itself came back with zero rows, not when the caller's own airline/price/
   duration/window filter removed rows Google did return. An adults-only
   search shows the schedule.
+
+  The MCP tools work around this. When `search_flights` gets no rows for such
+  a party, it re-runs the search pricing every traveler as an adult and
+  returns those flights with `prices_are_upper_bounds: true`. It also adds
+  `nearby_dates`, the full-party prices Google still includes for nearby date
+  pairs (`SearchFlights.nearby_date_prices`). A family `search_dates` sees
+  only the airlines Google prices for children, so its response says so;
+  `price_children_as_adults=true` prices every airline as upper bounds
+  instead.
 * **Date searches cost one page fetch per date.** The page has no calendar
   grid, so a range is priced date by date; one `SearchDates.search` covers at
   most 93 dates and a wider range raises `ValueError`. Budget for it: 93 dates

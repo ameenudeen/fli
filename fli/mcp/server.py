@@ -46,6 +46,7 @@ from fli.models import (
     display_name,
 )
 from fli.search import SearchDates, SearchFlights
+from fli.search._decoders import GridPrice
 from fli.search.dates import MAX_DATES_PER_SEARCH
 from fli.search.exceptions import SearchRejectedError
 from fli.search.flights import SPARSE_PASSENGER_MIX_WARNING
@@ -269,6 +270,15 @@ class DateSearchParams(BaseModel):
         None, description="Preferred departure time window in 'HH-HH' 24h format (e.g., '6-20')"
     )
     sort_by_price: bool = Field(False, description="Sort results by price (lowest first)")
+    price_children_as_adults: bool = Field(
+        False,
+        description=(
+            "Price every traveler (children and infants included) as an adult. "
+            "Google prices only some airlines for parties with children, so a "
+            "family search can miss cheaper carriers; this sees them all. Prices "
+            "are then upper bounds for the real party."
+        ),
+    )
     passengers: int = Field(
         CONFIG.default_passengers,
         ge=1,
@@ -700,6 +710,73 @@ def _search_error_message(exc: Exception, prefix: str = "Search failed") -> str:
     return f"{prefix}: {exc}"
 
 
+# Shown when prices were fetched with every traveler priced as an adult.
+_ADULT_PRICED_NOTE = (
+    "Prices treat every traveler as an adult, children and infants included. "
+    "Child and infant fares are normally lower, so each price is an upper bound "
+    "for the real party."
+)
+_PARTY_LINK_NOTE = " Each flight's booking_url opens Google Flights priced for the actual party."
+
+# Shown on a family date search that was not priced as adults.
+_FAMILY_COVERAGE_NOTE = (
+    "Google prices only some airlines for parties with children or infants, so "
+    "cheaper airlines may be missing here. Re-run with "
+    "price_children_as_adults=true to compare every airline (as upper bounds)."
+)
+
+
+def _has_children_or_infants(passenger_info: PassengerInfo) -> bool:
+    """Whether the party includes anyone Google prices client-side."""
+    return bool(
+        passenger_info.children or passenger_info.infants_in_seat or passenger_info.infants_on_lap
+    )
+
+
+def _all_travelers_as_adults(passenger_info: PassengerInfo) -> PassengerInfo:
+    """Return the same party size with everyone counted as an adult.
+
+    Google inlines rows for adults-only parties, so this is how a party with
+    children still gets every airline priced. Because a child or infant fare
+    does not exceed an adult fare, the result is an upper bound per itinerary.
+    """
+    total = (
+        passenger_info.adults
+        + passenger_info.children
+        + passenger_info.infants_in_seat
+        + passenger_info.infants_on_lap
+    )
+    return PassengerInfo(adults=total)
+
+
+def _serialize_nearby_dates(
+    nearby: list[GridPrice],
+    origins: list[Airport],
+    destinations: list[Airport],
+    params: FlightSearchParams,
+    currency: str | None,
+) -> list[dict[str, Any]]:
+    """Shape the nearby-dates grid (full-party prices) for the MCP response."""
+    return [
+        {
+            "departure_date": cell.outbound.isoformat(),
+            "return_date": cell.inbound.isoformat() if cell.inbound else None,
+            "price": cell.price,
+            "currency": cell.currency or currency,
+            "booking_url": _google_flights_url(
+                origins,
+                destinations,
+                cell.outbound.isoformat(),
+                cell.inbound.isoformat() if cell.inbound else None,
+                params.currency,
+                params.language,
+                params.country,
+            ),
+        }
+        for cell in nearby
+    ]
+
+
 def _execute_flight_search(params: FlightSearchParams) -> dict[str, Any]:
     """Execute a flight search and return formatted results."""
     try:
@@ -726,6 +803,25 @@ def _execute_flight_search(params: FlightSearchParams) -> dict[str, Any]:
             params.country,
         )
 
+        # Google served no rows because the party has children or infants
+        # (sparse_passenger_mix), not because the route is empty. Re-run with
+        # everyone priced as an adult so the caller gets every airline's
+        # schedule with an upper-bound price instead of nothing.
+        priced_as_adults = False
+        nearby = search_client.nearby_date_prices
+        if not flights and search_client.sparse_passenger_mix:
+            adult_filters = filters.model_copy(
+                update={"passenger_info": _all_travelers_as_adults(filters.passenger_info)}
+            )
+            flights = SearchFlights().search(
+                adult_filters,
+                top_n=params.top_n,
+                currency=currency,
+                language=params.language,
+                country=params.country,
+            )
+            priced_as_adults = bool(flights)
+
         if not flights:
             response: dict[str, Any] = {
                 "success": True,
@@ -743,6 +839,18 @@ def _execute_flight_search(params: FlightSearchParams) -> dict[str, Any]:
             # only be answered correctly once, there.
             if search_client.sparse_passenger_mix:
                 response["note"] = SPARSE_PASSENGER_MIX_WARNING
+            # Google still prices nearby date pairs for the full party when it
+            # inlines no rows; surface them so the caller has real fares to
+            # act on instead of an empty list.
+            if nearby:
+                response["nearby_dates"] = _serialize_nearby_dates(
+                    nearby, origins, destinations, params, currency
+                )
+                response["note"] = (
+                    response.get("note", "") + " Google did price nearby dates for this "
+                    "exact party: see nearby_dates (cheapest first, total for all "
+                    "passengers). Search one of those dates to see its flights."
+                ).strip()
             return response
 
         # Serialize results; attach per-flight deep-link booking URL.
@@ -766,13 +874,26 @@ def _execute_flight_search(params: FlightSearchParams) -> dict[str, Any]:
         if CONFIG.max_results:
             flight_results = flight_results[: CONFIG.max_results]
 
-        return {
+        response = {
             "success": True,
             "flights": flight_results,
             "count": len(flight_results),
             "trip_type": trip_type.name,
             "booking_url": booking_url,
         }
+        if priced_as_adults:
+            response["prices_are_upper_bounds"] = True
+            response["price_basis"] = "all_travelers_as_adults"
+            response["note"] = (
+                "Google priced no itineraries for this party with children or infants. "
+                + _ADULT_PRICED_NOTE
+                + _PARTY_LINK_NOTE
+            )
+            if nearby:
+                response["nearby_dates"] = _serialize_nearby_dates(
+                    nearby, origins, destinations, params, currency
+                )
+        return response
 
     except ParseError as e:
         return {
@@ -974,14 +1095,19 @@ def _execute_date_search(params: DateSearchParams) -> dict[str, Any]:
             )
 
         # Create search filters
+        passenger_info = PassengerInfo(
+            adults=params.passengers,
+            children=params.children,
+            infants_in_seat=params.infants_in_seat,
+            infants_on_lap=params.infants_on_lap,
+        )
+        has_kids = _has_children_or_infants(passenger_info)
+        priced_as_adults = has_kids and params.price_children_as_adults
+        if priced_as_adults:
+            passenger_info = _all_travelers_as_adults(passenger_info)
         filters = DateSearchFilters(
             trip_type=trip_type,
-            passenger_info=PassengerInfo(
-                adults=params.passengers,
-                children=params.children,
-                infants_in_seat=params.infants_in_seat,
-                infants_on_lap=params.infants_on_lap,
-            ),
+            passenger_info=passenger_info,
             flight_segments=segments,
             stops=max_stops,
             seat_type=cabin_class,
@@ -1005,6 +1131,19 @@ def _execute_date_search(params: DateSearchParams) -> dict[str, Any]:
             country=params.country,
         )
 
+        # Family date searches see only the airlines Google prices client-side
+        # for children; say so, or what the caller gets reads as the cheapest.
+        if priced_as_adults:
+            coverage: dict[str, Any] = {
+                "prices_are_upper_bounds": True,
+                "price_basis": "all_travelers_as_adults",
+                "note": _ADULT_PRICED_NOTE,
+            }
+        elif has_kids:
+            coverage = {"note": _FAMILY_COVERAGE_NOTE}
+        else:
+            coverage = {}
+
         if not dates:
             return {
                 "success": True,
@@ -1012,6 +1151,7 @@ def _execute_date_search(params: DateSearchParams) -> dict[str, Any]:
                 "count": 0,
                 "trip_type": trip_type.name,
                 "date_range": f"{params.start_date} to {params.end_date}",
+                **coverage,
             }
 
         if params.sort_by_price:
@@ -1031,6 +1171,7 @@ def _execute_date_search(params: DateSearchParams) -> dict[str, Any]:
             "trip_type": trip_type.name,
             "date_range": f"{params.start_date} to {params.end_date}",
             "duration": params.trip_duration if params.is_round_trip else None,
+            **coverage,
         }
 
     except ParseError as e:
@@ -1361,6 +1502,17 @@ def search_dates(
         int | None,
         Field(description="Maximum layover duration in minutes.", ge=1),
     ] = None,
+    price_children_as_adults: Annotated[
+        bool,
+        Field(
+            description=(
+                "Price every traveler (children and infants included) as an adult. "
+                "Google prices only some airlines for parties with children, so a "
+                "family search can miss cheaper carriers; this compares them all. "
+                "Prices are then upper bounds for the real party."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Find the cheapest travel dates between two airports within a date range.
 
@@ -1399,6 +1551,7 @@ def search_dates(
         exclude_alliance=exclude_alliance,
         min_layover=min_layover,
         max_layover=max_layover,
+        price_children_as_adults=price_children_as_adults,
     )
     return _execute_date_search(params)
 
