@@ -220,6 +220,13 @@ airline-direct and online-travel-agency options Google surfaces for it.
 Use `search_flights` first to discover flight numbers, then call this tool to
 find out where (and at what price) a specific flight can be booked.
 
+!!! warning "Per-vendor fares are currently unavailable"
+    Google now gates `GetBookingResults` behind a browser-signed request
+    header. The tool still succeeds: it returns the live `selected_flight`
+    (price included) with its per-flight `booking_url` deep link,
+    `options: []`, `booking_options_available: false`, and a `note`. Open
+    `selected_flight.booking_url` to see every vendor fare on Google Flights.
+
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
@@ -318,7 +325,7 @@ vocabulary once.
 | `validation_error` | `false` | Bad input — unknown airport code, an invalid passenger mix, a date range over the 93-date cap, etc. Fix the request; retrying unchanged will fail again. |
 | `unsupported_error` | `false` | The request is well-formed but this transport can't serve it (e.g. multi-city). Change the request. |
 | `parse_error` | `false` | Google served a page fli couldn't read. Usually (not always) a regional consent/blocked interstitial. Not retryable as-is; set `FLI_SOCS_COOKIE` (EU/EEA) and retry — don't just retry the same request unchanged. |
-| `rejected_error` | `false` | Google refused the RPC outright (e.g. `get_booking_options`'s `GetBookingResults` call today). Deterministic; retrying the same request will not help. |
+| `rejected_error` | `false` | Google refused the RPC outright (e.g. the library's `SearchFlights.get_booking_options` today — the MCP tool degrades rather than surfacing this). Deterministic; retrying the same request will not help. |
 | `timeout` | `true` | The request to Google Flights timed out. See retry guidance below. |
 | `certificate_error` | `false` | TLS certificate verification failed, most often behind a TLS-intercepting corporate proxy. Deterministic; set `FLI_CA_BUNDLE` (or `CURL_CA_BUNDLE` / `REQUESTS_CA_BUNDLE`) to a CA bundle path and try again — retrying unchanged will not help. |
 | `connection_error` | `true` | A network/DNS issue prevented reaching Google Flights. See retry guidance below. |

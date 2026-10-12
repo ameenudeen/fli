@@ -47,6 +47,7 @@ from fli.models import (
 )
 from fli.search import SearchDates, SearchFlights
 from fli.search.dates import MAX_DATES_PER_SEARCH
+from fli.search.exceptions import SearchRejectedError
 from fli.search.flights import SPARSE_PASSENGER_MIX_WARNING
 
 
@@ -854,13 +855,24 @@ def _execute_booking_options(
                 "retryable": False,
             }
 
-        options = search_client.get_booking_options(
-            flight,
-            filters,
-            currency=currency,
-            language=params.language,
-            country=params.country,
-        )
+        # GetBookingResults is gated behind the browser-signed
+        # x-goog-batchexecute-bgr header (see SearchRejectedError), so today
+        # this call is always declined. The search itself succeeded and the
+        # selected itinerary's tfs deep link is built offline, so degrade to
+        # that rather than failing the whole tool — the caller still gets the
+        # matched flight, its price and a link to its vendor-fares page.
+        rejection: SearchRejectedError | None = None
+        try:
+            options = search_client.get_booking_options(
+                flight,
+                filters,
+                currency=currency,
+                language=params.language,
+                country=params.country,
+            )
+        except SearchRejectedError as e:
+            rejection = e
+            options = []
 
         is_round_trip = trip_type == TripType.ROUND_TRIP
         flight_booking_url = search_client.build_flight_booking_url(
@@ -881,7 +893,16 @@ def _execute_booking_options(
             "count": len(serialized),
             "booking_url": booking_url,
         }
-        if not serialized:
+        if rejection is not None:
+            result["booking_options_available"] = False
+            result["note"] = (
+                "Per-vendor fares are unavailable: Google now requires a "
+                "browser-signed request for them, which this server cannot "
+                "produce. selected_flight and its price are live. Open "
+                "selected_flight.booking_url to see every airline and agency "
+                "fare for this exact flight on Google Flights."
+            )
+        elif not serialized:
             # Google's GetBookingResults frequently returns no vendors without a
             # browser-minted session token that fli does not reproduce server-side.
             # The per-flight deep link in selected_flight.booking_url opens the
@@ -1542,9 +1563,16 @@ def get_booking_options(
     because ``search_flights`` was called with a higher ``top_n`` may not be
     found at all.
 
+    Per-vendor fares currently cannot be fetched: Google gates them behind a
+    browser-signed request. When that happens the call still succeeds with
+    ``options: []``, ``booking_options_available: false``, the live
+    ``selected_flight`` (price included) and a ``note`` — hand the user
+    ``selected_flight.booking_url``, which opens that exact itinerary's fare
+    list on Google Flights.
+
     On failure (``success: false``, including "no flight matched
     flight_numbers"), the response also carries ``error_type`` (e.g.
-    ``validation_error``, ``rejected_error``) and a ``retryable`` bool —
+    ``validation_error``) and a ``retryable`` bool —
     classify the failure from ``error_type`` instead of parsing the
     ``error`` message text. The client has already retried internally with
     backoff; if ``retryable`` is true, retry at most once or twice more

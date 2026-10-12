@@ -137,8 +137,8 @@ Consequences to keep in mind when changing search code:
   passengers, alliances and layover bounds are encoded into the request.
 - Multi-city raises `SearchUnsupportedError` — the page inlines no rows for it.
 - `get_booking_options` hits `GetBookingResults`, which is still gated, so it
-  currently raises `SearchRejectedError`. Booking deep links (`tfs`) are built
-  offline and unaffected.
+  currently raises `SearchRejectedError`; the MCP tool degrades instead of
+  failing. Booking deep links (`tfs`) are built offline and unaffected.
 - A search returns fewer rows than the old RPC (~20-45), and client-side
   filtering is not back-filled.
 - **Children and infants thin the results — sometimes to nothing.** Google
@@ -258,10 +258,16 @@ Find cheapest travel dates within a range.
 Flights for that specific date (and return date for round trips).
 
 ### `get_booking_options`
-**Currently unavailable:** it calls `GetBookingResults`, which is gated behind
-the browser-signed header (see "Search transport"), so it raises
-`SearchRejectedError`. Use a flight's `booking_url` deep link instead. The rest
-of this section describes the tool for when that RPC becomes reachable again.
+**Per-vendor fares currently unavailable:** it calls `GetBookingResults`, which
+is gated behind the browser-signed header (see "Search transport"), so
+`SearchFlights.get_booking_options` raises `SearchRejectedError`. The MCP tool
+catches exactly that error and degrades: `success: true`, `options: []`,
+`booking_options_available: false`, a `note`, and the live `selected_flight`
+whose `booking_url` deep link opens that itinerary's fares on Google Flights.
+(A headless browser does not get around this: as of 2026-10 Google answers
+headless Chrome on `/travel/flights/booking` with its `/sorry` CAPTCHA page.)
+The rest of this section describes the tool for when that RPC becomes
+reachable again.
 
 Get bookable fares (vendor names, prices, and direct booking URLs) for a
 single itinerary. Runs a fresh search, selects the flight identified by
@@ -306,7 +312,7 @@ as-is rather than renamed for the MCP tools.
 | `validation_error` | `false` | Bad input — unknown airport code, an invalid passenger mix, a date range over the 93-date cap, etc. Fix the request; retrying unchanged will fail again. |
 | `unsupported_error` | `false` | The request is well-formed but this transport can't serve it (e.g. multi-city). Change the request. |
 | `parse_error` | `false` | Google served a page fli couldn't read. Usually (not always) a regional consent/blocked interstitial. Not retryable as-is; set `FLI_SOCS_COOKIE` (EU/EEA) and retry — don't just retry the same request unchanged. |
-| `rejected_error` | `false` | Google refused the RPC outright (e.g. `get_booking_options`'s `GetBookingResults` call today — see above). Deterministic; retrying the same request will not help. |
+| `rejected_error` | `false` | Google refused the RPC outright (e.g. the library's `SearchFlights.get_booking_options` today — the MCP tool degrades rather than surfacing this — see above). Deterministic; retrying the same request will not help. |
 | `timeout` | `true` | The request to Google Flights timed out. See retry guidance below. |
 | `certificate_error` | `false` | TLS certificate verification failed, most often behind a TLS-intercepting corporate proxy. Deterministic; set `FLI_CA_BUNDLE` (or `CURL_CA_BUNDLE` / `REQUESTS_CA_BUNDLE`) and try again — retrying unchanged will not help. |
 | `connection_error` | `true` | A network/DNS issue prevented reaching Google Flights. See retry guidance below. |

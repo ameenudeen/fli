@@ -237,7 +237,10 @@ class TestBookingOptionsErrorType:
         assert result["error_type"] == "validation_error"
         assert result["retryable"] is False
 
-    @pytest.mark.parametrize("exc,expected_type,expected_retryable", _SEARCH_CLIENT_ERROR_CASES)
+    @pytest.mark.parametrize(
+        "exc,expected_type,expected_retryable",
+        [c for c in _SEARCH_CLIENT_ERROR_CASES if c.id != "rejected"],
+    )
     def test_get_booking_options_error_types(
         self, monkeypatch, params, exc, expected_type, expected_retryable
     ):
@@ -249,6 +252,33 @@ class TestBookingOptionsErrorType:
         assert result["error_type"] == expected_type
         assert result["retryable"] is expected_retryable
         assert result["options"] == []
+
+    def test_rejected_booking_rpc_degrades_to_selected_flight(self, monkeypatch, params):
+        """GetBookingResults is gated: keep the live search result and its deep link."""
+        flight = self._flight()
+        monkeypatch.setattr("fli.mcp.server.SearchFlights.search", lambda me, *a, **k: [flight])
+        monkeypatch.setattr(
+            "fli.mcp.server.SearchFlights.get_booking_options", _raiser(SearchRejectedError(13))
+        )
+        monkeypatch.setattr(
+            "fli.mcp.server.SearchFlights.build_flight_booking_url",
+            lambda me, *a, **k: "https://www.google.com/travel/flights/booking?tfs=X",
+        )
+        monkeypatch.setattr(
+            "fli.mcp.server._serialize_flight_result",
+            lambda f, rt, booking_url=None: {"price": f.price, "booking_url": booking_url},
+        )
+        result = _execute_booking_options(params, None)
+        assert result["success"] is True
+        assert "error_type" not in result
+        assert result["options"] == []
+        assert result["count"] == 0
+        assert result["booking_options_available"] is False
+        assert result["selected_flight"] == {
+            "price": 400.0,
+            "booking_url": "https://www.google.com/travel/flights/booking?tfs=X",
+        }
+        assert "selected_flight.booking_url" in result["note"]
 
     def test_successful_response_has_no_error_type(self, monkeypatch, params):
         flight = self._flight()

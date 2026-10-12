@@ -151,10 +151,10 @@ class TestSearchFlightsGetBookingOptions:
         assert exc_info.value.code == 13
 
 
-class TestMcpGetBookingOptionsReportsRejectedError:
-    """End to end: the MCP tool's response carries the new classification fields."""
+class TestMcpGetBookingOptionsDegradesOnRejectedError:
+    """End to end: a gated booking RPC degrades to the live itinerary + deep link."""
 
-    def test_error_type_and_retryable(self, monkeypatch, fixture_body):
+    def test_selected_flight_and_deep_link_survive(self, monkeypatch, fixture_body):
         flight = _one_way_flight()
         # Short-circuit the initial shopping search (no network needed for it) —
         # only the booking-options POST should hit the captured envelope.
@@ -166,8 +166,13 @@ class TestMcpGetBookingOptionsReportsRejectedError:
         )
         result = _execute_booking_options(params, None)
 
-        assert result["success"] is False
-        assert result["options"] == []  # existing field untouched
-        assert "13" in result["error"]  # existing message untouched
-        assert result["error_type"] == "rejected_error"
-        assert result["retryable"] is False
+        assert result["success"] is True
+        assert "error_type" not in result
+        assert result["options"] == []
+        assert result["count"] == 0
+        assert result["booking_options_available"] is False
+        assert result["selected_flight"]["price"] == flight.price
+        assert result["selected_flight"]["booking_url"].startswith(
+            "https://www.google.com/travel/flights/booking?tfs="
+        )
+        assert "selected_flight.booking_url" in result["note"]

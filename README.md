@@ -184,9 +184,12 @@ What that means in practice:
 * **Multi-city raises `SearchUnsupportedError`.** Google loads those results
   client-side through the gated RPC, so the page carries no rows to read.
   Search each leg separately.
-* **`get_booking_options` is unavailable.** It calls `GetBookingResults`, which
-  is gated the same way, and currently raises `SearchRejectedError`. The
-  per-flight `tfs` booking deep links are built offline and still work.
+* **No per-vendor booking fares.** `SearchFlights.get_booking_options` calls
+  `GetBookingResults`, which is gated the same way, and raises
+  `SearchRejectedError`. The MCP `get_booking_options` tool catches that and
+  still returns the live `selected_flight` (with its price) plus
+  `booking_options_available: false`, so the agent can hand over the
+  per-flight `tfs` booking deep link — built offline and unaffected.
 * **Fewer rows per search.** Expect roughly 20-45 itineraries, fewer than the
   old RPC returned — and a client-side filter cannot back-fill the list the way
   Google's server-side one did.
